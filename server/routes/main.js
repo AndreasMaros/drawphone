@@ -1,141 +1,144 @@
-const webpackAssets = require("../../webpack-assets.json");
+import webpackAssets from "../../webpack-assets.json";
+import WordPacks from "../app/words.js";
 
-module.exports = function (app) {
-	var dp = app.drawphone;
-	var allPackNames = require("../app/words").getAllPackNames();
-	var safePackNames = require("../app/words").getAllPackNames(true);
+const { getAllPackNames } = WordPacks;
 
-	app.get("/", function (req, res) {
-		const isSafeForWorkURL = req.headers.host.startsWith("dpk");
-		const wordpacks = isSafeForWorkURL ? safePackNames : allPackNames;
+export default (app) => {
+    const dp = app.drawphone;
+    const allPackNames = getAllPackNames();
+    const safePackNames = getAllPackNames(true);
 
-		res.render("index", {
-			wordpacks,
-			js: webpackAssets.main.js,
-			css: webpackAssets.main.css,
-		});
-	});
+    app.get("/", ({ headers }, res) => {
+        const isSafeForWorkURL = headers.host.startsWith("dpk");
+        const wordpacks = isSafeForWorkURL ? safePackNames : allPackNames;
 
-	app.get("/how-to-play", function (req, res) {
-		res.render("howtoplay", {
-			js: webpackAssets.main.js,
-			css: webpackAssets.main.css,
-		});
-	});
+        res.render("index", {
+            wordpacks,
+            js: webpackAssets.main.js,
+            css: webpackAssets.main.css,
+        });
+    });
 
-	app.get("/screenshots", function (req, res) {
-		res.render("screenshots", {
-			js: webpackAssets.main.js,
-			css: webpackAssets.main.css,
-		});
-	});
+    app.get("/how-to-play", (req, res) => {
+        res.render("howtoplay", {
+            js: webpackAssets.main.js,
+            css: webpackAssets.main.css,
+        });
+    });
 
-	app.get("/more-games", function (req, res) {
-		res.render("moregames", {
-			js: webpackAssets.main.js,
-			css: webpackAssets.main.css,
-		});
-	});
+    app.get("/screenshots", (req, res) => {
+        res.render("screenshots", {
+            js: webpackAssets.main.js,
+            css: webpackAssets.main.css,
+        });
+    });
 
-	app.get("/archive", function (req, res) {
-		res.render("archive", {
-			js: webpackAssets.main.js,
-			css: webpackAssets.main.css,
-		});
-	});
+    app.get("/more-games", (req, res) => {
+        res.render("moregames", {
+            js: webpackAssets.main.js,
+            css: webpackAssets.main.css,
+        });
+    });
 
-	app.get("/stats", function (req, res) {
-		var games = [];
-		let realPlayerCount = 0;
-		for (var game of dp.games) {
-			const players = game.players.length - game.botCount;
-			realPlayerCount += players;
+    app.get("/archive", (req, res) => {
+        res.render("archive", {
+            js: webpackAssets.main.js,
+            css: webpackAssets.main.css,
+        });
+    });
 
-			var strippedGame = {
-				players,
-				roundsPlayed: game.currentRoundNum - 1,
-				lastAction: timeSince(game.timeOfLastAction),
-				inProgress: game.inProgress,
-			};
+    app.get("/stats", (req, res) => {
+        const games = [];
+        let realPlayerCount = 0;
+        for (const game of dp.games) {
+            const players = game.players.length - game.botCount;
+            realPlayerCount += players;
 
-			games.unshift(strippedGame);
-		}
+            const strippedGame = {
+                players,
+                roundsPlayed: game.currentRoundNum - 1,
+                lastAction: timeSince(game.timeOfLastAction),
+                inProgress: game.inProgress,
+            };
 
-		const lastRebootDate = new Date();
-		lastRebootDate.setSeconds(
-			lastRebootDate.getSeconds() - process.uptime()
-		);
+            games.unshift(strippedGame);
+        }
 
-		res.json({
-			totalSocketClients: app.io.engine.clientsCount,
-			totalRealPlayers: realPlayerCount,
-			lastReboot: timeSince(lastRebootDate),
-			games: games,
-		});
-	});
+        const lastRebootDate = new Date();
+        lastRebootDate.setSeconds(
+            lastRebootDate.getSeconds() - process.uptime()
+        );
 
-	app.get("/admin", function (req, res) {
-		res.render("admin");
-	});
+        res.json({
+            totalSocketClients: app.io.engine.clientsCount,
+            totalRealPlayers: realPlayerCount,
+            lastReboot: timeSince(lastRebootDate),
+            games,
+        });
+    });
 
-	app.post("/lock", function (req, res) {
-		if (!process.env.ADMIN_PASSWORD) {
-			res.status(501).end();
-		}
+    app.get("/admin", (req, res) => {
+        res.render("admin");
+    });
 
-		if (req.body.password === process.env.ADMIN_PASSWORD) {
-			dp.lock();
-			res.status(200).end();
-		} else {
-			res.status(401).end();
-		}
-	});
+    app.post("/lock", ({ body }, res) => {
+        if (!process.env.ADMIN_PASSWORD) {
+            res.status(501).end();
+        }
 
-	app.post("/new", function (req, res) {
-		if (dp.locked) {
-			// 423 Locked
-			return res.status(423).send({ minutes: dp.minutesUntilRestart });
-		}
+        if (body.password === process.env.ADMIN_PASSWORD) {
+            dp.lock();
+            res.status(200).end();
+        } else {
+            res.status(401).end();
+        }
+    });
 
-		const theGame = dp.newGame();
-		res.json({ gameCode: theGame.code });
-	});
+    app.post("/new", (req, res) => {
+        if (dp.locked) {
+            // 423 Locked
+            return res.status(423).send({ minutes: dp.minutesUntilRestart });
+        }
 
-	if (app.get("env") === "development") {
-		app.get("/dev", function (req, res) {
-			res.render("index", {
-				wordpacks: allPackNames,
-				js: webpackAssets.main.js,
-				css: webpackAssets.main.css,
-			});
-		});
-	}
+        const theGame = dp.newGame();
+        res.json({ gameCode: theGame.code });
+    });
+
+    if (app.get("env") === "development") {
+        app.get("/dev", (req, res) => {
+            res.render("index", {
+                wordpacks: allPackNames,
+                js: webpackAssets.main.js,
+                css: webpackAssets.main.css,
+            });
+        });
+    }
 };
 
 // https://stackoverflow.com/a/3177838
 function timeSince(date) {
-	var seconds = Math.floor((new Date() - date) / 1000);
+    const seconds = Math.floor((new Date() - date) / 1000);
 
-	var interval = Math.floor(seconds / 31536000);
+    let interval = Math.floor(seconds / 31536000);
 
-	if (interval > 1) {
-		return interval + " years";
-	}
-	interval = Math.floor(seconds / 2592000);
-	if (interval > 1) {
-		return interval + " months";
-	}
-	interval = Math.floor(seconds / 86400);
-	if (interval > 1) {
-		return interval + " days";
-	}
-	interval = Math.floor(seconds / 3600);
-	if (interval > 1) {
-		return interval + " hours";
-	}
-	interval = Math.floor(seconds / 60);
-	if (interval > 1) {
-		return interval + " minutes";
-	}
-	return Math.floor(seconds) + " seconds";
+    if (interval > 1) {
+        return `${interval} years`;
+    }
+    interval = Math.floor(seconds / 2592000);
+    if (interval > 1) {
+        return `${interval} months`;
+    }
+    interval = Math.floor(seconds / 86400);
+    if (interval > 1) {
+        return `${interval} days`;
+    }
+    interval = Math.floor(seconds / 3600);
+    if (interval > 1) {
+        return `${interval} hours`;
+    }
+    interval = Math.floor(seconds / 60);
+    if (interval > 1) {
+        return `${interval} minutes`;
+    }
+    return `${Math.floor(seconds)} seconds`;
 }

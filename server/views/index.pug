@@ -16,7 +16,7 @@ block content
     include announcements.pug
     .btn-toolbar.mt-3
       a.btn.btn-default.btn-lg.mr-2(href="https://rocketcrab.com/join",type='button') Join Party
-      a.btn.btn-default.btn-lg(href="https://rocketcrab.com/transfer/new",type='button') Start Party
+      a.btn.btn-default.btn-lg(href="https://rocketcrab.com/transfer/drawphone",type='button') Start Party
     .mt-3.mb-3
       |Powered by 
       img.rocketsvg.ml-1(src='https://rocketcrab.com/rocket.svg' alt='' width='16')
@@ -57,7 +57,10 @@ block content
       div.col-sm-8
         h5 Players
         ul#lobby-players.list-unstyled.row
-      button#lobby-prevres.btn.btn-default.mt-3(type='button').d-none View Last Round's Results
+      .mt-2.btn-group-vertical(role="group" aria-label="...")
+        a.btn.btn-default(href="https://drawphone.tannerkrewson.com/archive", target='_blank', type='button') View Results Archive
+        button#lobby-prevres.btn.btn-default(type='button').d-none View Last Round's Results
+      .mt-2 Tip: There is no limit to the number of players that can join!
     div.row.justify-content-center.mb-3
       div#lobby-settings.col-sm-8.d-none
         h5 Options
@@ -66,18 +69,25 @@ block content
           option(disabled='', selected='') Select a word pack...
           for item in wordpacks
             option #{item}
-        label Time limit:
+        label Drawing time limit:
         .btn-toolbar.mb-3
           button#timelimit-minus.lobby-setting.btn.btn-default -
           span#lobby-settings-timelimit Loading...
           button#timelimit-plus.lobby-setting.btn.btn-default +
-        .checkboxes.mb-3
+        label Number of turns:
+        .btn-toolbar
+          button#turnlimit-minus.lobby-setting.btn.btn-default -
+          span#lobby-settings-turnlimit Loading...
+          button#turnlimit-plus.lobby-setting.btn.btn-default +
+        .mb-3#lobby-settings-gametime Loading...
+        .checkboxes.mb-2
           .custom-control.custom-switch
             input#lobby-settings-wordfirst.custom-control-input.lobby-setting(type='checkbox')
             label.custom-control-label(for='lobby-settings-wordfirst') Players write first word
-          .custom-control.custom-switch
-            input#lobby-settings-showNeighbors.custom-control-input.lobby-setting(type='checkbox')
-            label.custom-control-label(for='lobby-settings-showNeighbors') Show who players are passing to and from
+          //- TODO: make this work again
+            .custom-control.custom-switch
+              input#lobby-settings-showNeighbors.custom-control-input.lobby-setting(type='checkbox')
+              label.custom-control-label(for='lobby-settings-showNeighbors') Show who players are passing to and from
         .btn-toolbar.mb-3#lobby-settings-bots.d-none
           button#lobby-settings-addbot.btn.btn-default.mr-2(type='button') Add Bot
           button#lobby-settings-removebot.btn.btn-default(type='button') Remove Bot
@@ -111,6 +121,9 @@ block content
           div.input-group-prepend
             span.input-group-text Color
           input#game-drawing-color.form-control(type='color', value='#000000')
+          button#game-drawing-recent-color1.form-control(style='background-color: #c71818;')
+          button#game-drawing-recent-color2.form-control(style='background-color: #10AC10;')
+          button#game-drawing-recent-color3.form-control(style='background-color: #1a79af;')
       div.col-md-6.mt-2
         div.input-group
           div.input-group-prepend

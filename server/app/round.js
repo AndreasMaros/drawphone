@@ -2,418 +2,525 @@
 // Drawphone Round
 //
 
-var shuffle = require("knuth-shuffle").knuthShuffle;
-var stripTags = require("striptags");
+import { knuthShuffle as shuffle } from "knuth-shuffle";
+import stripTags from "striptags";
 
-var Chain = require("./chain");
-var AIGuessQueue = require("./ai-guess-queue");
-var DrawingLink = require("./link/drawinglink");
-var WordLink = require("./link/wordlink");
-var { sendResultsToAwsArchive } = require("./aws-archive");
+import Chain from "./chain.js";
+import AIGuessQueue from "./ai-guess-queue.js";
+import DrawingLink from "./link/drawinglink.js";
+import WordLink from "./link/wordlink.js";
+import { sendResultsToAwsArchive } from "./aws-archive.js";
+import WordPacks from "./words.js";
+import { getNewTurnLimit } from "../../shared/util.js";
 
-var WordPacks = require("./words");
-var words = new WordPacks();
+const words = new WordPacks();
 words.loadAll();
 
-function Round(
-	number,
-	players,
-	timeLimit,
-	wordPackName,
-	showNeighbors,
-	onResults
-) {
-	this.number = number;
-	this.players = players;
-	this.timeLimit = timeLimit;
-	this.wordPackName = wordPackName;
-	this.showNeighbors = showNeighbors;
-	this.onResults = onResults;
-	this.chains = [];
-	this.disconnectedPlayers = [];
-	this.potentialPlayers = [];
-	this.canViewLastRoundResults = false;
-	this.isWordFirstGame = !this.wordPackName;
+// https://stackoverflow.com/a/33352604
+const arrayFromOneToN = (length, offset = 0) =>
+    Array.from({ length }, (_, i) => i + offset);
 
-	this.startTime;
+// https://stackoverflow.com/a/58326608
+const rotateArray = (arr, count = 1) => [
+    ...arr.slice(count, arr.length),
+    ...arr.slice(0, count),
+];
 
-	if (this.isWordFirstGame) {
-		this.shouldHaveThisManyLinks = 1;
-	} else {
-		//chains will already have one link
-		this.shouldHaveThisManyLinks = 2;
-	}
+// https://math.stackexchange.com/a/4000891
+// "In the odd prime case..."
+const oddApproxRCLS = (numPlayers, numTurns) => {
+    const m = (numPlayers - 1) / 2;
 
-	this.finalNumOfLinks;
-	this.aiGuessQueue = new AIGuessQueue(() =>
-		words.getRandomWord(this.wordPackName || "Simple words (recommended)")
-	);
+    let result = [arrayFromOneToN(numPlayers)];
+    const last = () => result[result.length - 1];
+
+    for (let i = 1; i <= m; i++) {
+        const direction = i % 2 === 0 ? -1 : 1;
+        result.push(rotateArray(last(), i * direction));
+    }
+
+    const mDirection = m % 2 === 0 ? -1 : 1;
+    result.push(rotateArray(last(), mDirection));
+
+    for (let i = m - 1; i >= Math.max(1, m - numTurns); i--) {
+        const direction = i % 2 === 0 ? 1 : -1;
+        result.push(rotateArray(last(), i * direction));
+    }
+
+    return result;
+};
+
+// https://math.stackexchange.com/a/4000891
+// "It is easy to solve the problem when n is even. First..."d
+function evenExactRCLS(numPlayers, numTurns) {
+    let result = [arrayFromOneToN(numPlayers)];
+    const last = () => result[result.length - 1];
+
+    for (let i = 1; i < numTurns; i++) {
+        const direction = i % 2 === 0 ? -1 : 1;
+        result.push(rotateArray(last(), i * direction));
+    }
+
+    return result;
 }
 
-Round.prototype.start = function() {
-	this.finalNumOfLinks = this.players.length;
-	this.aiGuessQueue.reset();
+const rowCompleteLatinSquare = (numPlayers, numTurns) =>
+    numPlayers % 2 === 0
+        ? evenExactRCLS(numPlayers, numTurns)
+        : oddApproxRCLS(numPlayers, numTurns);
 
-	// demo mode
-	if (this.players.length === 1) {
-		this.finalNumOfLinks = 6;
-	}
+class Round {
+    constructor(
+        number,
+        players,
+        timeLimit,
+        wordPackName,
+        showNeighbors,
+        turnLimit,
+        onResults
+    ) {
+        this.number = number;
+        this.players = players;
+        this.timeLimit = timeLimit;
+        this.wordPackName = wordPackName;
+        this.showNeighbors = showNeighbors;
+        this.onResults = onResults;
+        this.chains = [];
+        this.linkOrder;
+        this.roundNumber = 0;
+        this.disconnectedPlayers = [];
+        this.potentialPlayers = [];
+        this.canViewLastRoundResults = false;
+        this.isWordFirstGame = !this.wordPackName;
+        this.turnLimit = this.validTurnLimit(turnLimit);
 
-	//each player will have to complete one link for how many players there are
-	//  the final number of links each chain should have at the end of this
-	//  round is number of players + 1, because each chain has an extra link
-	//  for the original word
-	if (!this.isWordFirstGame) {
-		this.finalNumOfLinks++;
-	}
+        this.startTime;
 
-	//contrary to the above comment, i now want every chain to end in a word
-	// so that the Start to End results box always starts and ends works correctly.
-	//to do this, i take away on link if there is an even number of final links
-	if (this.finalNumOfLinks % 2 === 0) {
-		this.finalNumOfLinks--;
-	}
+        if (this.isWordFirstGame) {
+            this.shouldHaveThisManyLinks = 1;
+        } else {
+            //chains will already have one link
+            this.shouldHaveThisManyLinks = 2;
+        }
 
-	//shuffle the player list in place
-	shuffle(this.players);
+        this.finalNumOfLinks;
+        this.aiGuessQueue = new AIGuessQueue(() =>
+            words.getRandomWord(
+                this.wordPackName || "Simple words (recommended)"
+            )
+        );
+    }
 
-	if (!this.isWordFirstGame) {
-		this.sendNewChains();
-	} else {
-		this.sendWordFirstChains();
-	}
+    start() {
+        this.aiGuessQueue.reset();
 
-	this.startTime = Date.now();
-};
+        // demo mode
+        if (this.players.length === 1) {
+            this.finalNumOfLinks = 6;
+        } else {
+            this.finalNumOfLinks = this.turnLimit;
+        }
 
-Round.prototype.sendNewChains = function() {
-	var currentChainId = 0;
-	var self = this;
+        //each player will have to complete one link for how many players there are
+        //  the final number of links each chain should have at the end of this
+        //  round is number of players + 1, because each chain has an extra link
+        //  for the original word
+        if (!this.isWordFirstGame) {
+            this.finalNumOfLinks++;
+        }
 
-	var jsonPlayers = this.showNeighbors
-		? this.players.map(player => player.getJson())
-		: null;
+        //contrary to the above comment, i now want every chain to end in a word
+        // so that the Start to End results box always starts and ends works correctly.
+        //to do this, i take away on link if there is an even number of final links
+        if (this.finalNumOfLinks % 2 === 0) {
+            this.finalNumOfLinks--;
+        }
 
-	this.players.forEach(function(player) {
-		if (player.isAi) player.setAIGuessQueue(self.aiGuessQueue);
+        //shuffle the player list in place
+        shuffle(this.players);
 
-		//give each player a chain of their own
-		var wordToDraw = words.getRandomWord(self.wordPackName);
-		var thisChain = new Chain(
-			wordToDraw,
-			player,
-			currentChainId++,
-			self.timeLimit,
-			self.showNeighbors,
-			jsonPlayers
-		);
-		self.chains.push(thisChain);
+        if (!this.isWordFirstGame) {
+            this.sendNewChains();
+        } else {
+            this.sendWordFirstChains();
+        }
 
-		//sends the link, then runs the function when the player sends it back
-		//  when the 'finishedLink' event is received
-		thisChain.sendLastLinkToThen(player, self.finalNumOfLinks, function(
-			data
-		) {
-			self.receiveLink(player, data.link, thisChain.id);
-		});
-	});
-};
+        // demo mode
+        if (this.players.length === 1) {
+            this.linkOrder = [[0], [0], [0], [0], [0]];
+        } else {
+            this.linkOrder = rowCompleteLatinSquare(
+                this.players.length,
+                this.finalNumOfLinks
+            );
+        }
 
-Round.prototype.sendWordFirstChains = function() {
-	var currentChainId = 0;
-	var self = this;
+        this.startTime = Date.now();
+    }
 
-	var jsonPlayers = this.showNeighbors
-		? this.players.map(player => player.getJson())
-		: null;
+    sendNewChains() {
+        let currentChainId = 0;
 
-	this.players.forEach(function(player) {
-		if (player.isAi) player.setAIGuessQueue(self.aiGuessQueue);
+        const jsonPlayers = this.showNeighbors
+            ? this.players.map((player) => player.getJson())
+            : null;
 
-		//give each player a chain of their own
-		var thisChain = new Chain(
-			false,
-			player,
-			currentChainId++,
-			self.timeLimit,
-			self.showNeighbors,
-			jsonPlayers
-		);
-		self.chains.push(thisChain);
+        this.players.forEach((player) => {
+            if (player.isAi) player.setAIGuessQueue(this.aiGuessQueue);
 
-		//sends the link, then runs the function when the player sends it back
-		//  when the 'finishedLink' event is received
-		thisChain.sendLastLinkToThen(player, self.finalNumOfLinks, function(
-			data
-		) {
-			self.receiveLink(player, data.link, thisChain.id);
-		});
-	});
-};
+            //give each player a chain of their own
+            const wordToDraw = words.getRandomWord(this.wordPackName);
+            const thisChain = new Chain(
+                wordToDraw,
+                player,
+                currentChainId++,
+                this.timeLimit,
+                this.showNeighbors,
+                jsonPlayers
+            );
+            this.chains.push(thisChain);
 
-Round.prototype.receiveLink = function(player, receivedLink, chainId) {
-	var chain = this.getChain(chainId);
+            //sends the link, then runs the function when the player sends it back
+            //  when the 'finishedLink' event is received
+            thisChain.sendLastLinkToThen(
+                player,
+                this.finalNumOfLinks,
+                ({ link }) => {
+                    this.receiveLink(player, link, thisChain.id);
+                }
+            );
+        });
+    }
 
-	this.aiGuessQueue.playerAvailableForWork(player);
+    sendWordFirstChains() {
+        let currentChainId = 0;
 
-	if (receivedLink.type === "drawing") {
-		chain.addLink(new DrawingLink(player, receivedLink.data));
-	} else if (receivedLink.type === "word") {
-		chain.addLink(new WordLink(player, stripTags(receivedLink.data)));
-	} else {
-		console.log("receivedLink.type is " + receivedLink.type);
-	}
+        const jsonPlayers = this.showNeighbors
+            ? this.players.map((player) => player.getJson())
+            : null;
 
-	this.updateWaitingList();
-	this.nextLinkIfEveryoneIsDone();
-};
+        this.players.forEach((player) => {
+            if (player.isAi) player.setAIGuessQueue(this.aiGuessQueue);
 
-Round.prototype.nextLinkIfEveryoneIsDone = function() {
-	var listNotFinished = this.getListOfNotFinishedPlayers();
-	var areChainsInitialized = this.players.length === this.chains.length;
-	var allFinished = areChainsInitialized && listNotFinished.length === 0;
-	var noneDisconnected = this.disconnectedPlayers.length === 0;
+            //give each player a chain of their own
+            const thisChain = new Chain(
+                false,
+                player,
+                currentChainId++,
+                this.timeLimit,
+                this.showNeighbors,
+                jsonPlayers
+            );
+            this.chains.push(thisChain);
 
-	if (allFinished && noneDisconnected) {
-		this.aiGuessQueue.reset();
+            //sends the link, then runs the function when the player sends it back
+            //  when the 'finishedLink' event is received
+            thisChain.sendLastLinkToThen(
+                player,
+                this.finalNumOfLinks,
+                ({ link }) => {
+                    this.receiveLink(player, link, thisChain.id);
+                }
+            );
+        });
+    }
 
-		//check if that was the last link
-		if (this.shouldHaveThisManyLinks === this.finalNumOfLinks) {
-			this.viewResults();
-		} else {
-			this.startNextLink();
-		}
-	}
-};
+    receiveLink(player, { type, data }, chainId) {
+        const chain = this.getChain(chainId);
 
-Round.prototype.startNextLink = function() {
-	this.shouldHaveThisManyLinks++;
+        this.aiGuessQueue.playerAvailableForWork(player);
 
-	//rotate the chains in place
-	//  this is so that players get a chain they have not already had
-	this.chains.push(this.chains.shift());
+        if (type === "drawing") {
+            chain.addLink(new DrawingLink(player, data));
+        } else if (type === "word") {
+            chain.addLink(new WordLink(player, stripTags(data)));
+        } else {
+            console.log(`receivedLink.type is ${type}`);
+        }
 
-	//distribute the chains to each player
-	//  players and chains will have the same length
-	var self = this;
-	for (var i = 0; i < this.players.length; i++) {
-		var thisChain = this.chains[i];
-		var thisPlayer = this.players[i];
+        this.updateWaitingList();
+        this.nextLinkIfEveryoneIsDone();
+    }
 
-		thisChain.lastPlayerSentTo = thisPlayer.getJson();
+    nextLinkIfEveryoneIsDone() {
+        const listNotFinished = this.getListOfNotFinishedPlayers();
+        const areChainsInitialized = this.players.length === this.chains.length;
+        const allFinished =
+            areChainsInitialized && listNotFinished.length === 0;
+        const noneDisconnected = this.disconnectedPlayers.length === 0;
 
-		//sends the link, then runs the function when the player sends it back
-		//  when the 'finishedLink' event is received
-		(function(chain, player) {
-			chain.sendLastLinkToThen(player, self.finalNumOfLinks, function(
-				data
-			) {
-				self.receiveLink(player, data.link, chain.id);
-			});
-		})(thisChain, thisPlayer);
-	}
-};
+        if (allFinished && noneDisconnected) {
+            this.aiGuessQueue.reset();
 
-Round.prototype.getChain = function(id) {
-	for (var i = 0; i < this.chains.length; i++) {
-		if (this.chains[i].id === id) {
-			return this.chains[i];
-		}
-	}
-	return false;
-};
+            //check if that was the last link
+            if (this.shouldHaveThisManyLinks === this.finalNumOfLinks) {
+                this.viewResults();
+            } else {
+                this.startNextLink();
+            }
+        }
+    }
 
-Round.prototype.getChainByOwnerId = function(ownerId) {
-	for (var i = 0; i < this.chains.length; i++) {
-		if (this.chains[i].owner.id === ownerId) {
-			return this.chains[i];
-		}
-	}
-	return false;
-};
+    startNextLink() {
+        this.shouldHaveThisManyLinks++;
 
-Round.prototype.viewResults = function() {
-	const chains = this.getAllChains();
+        //the first column of linkOrder has the first player in it
+        //  don't send players their own drawings
+        this.roundNumber++;
 
-	//starts as false, and will be true every round after first round
-	this.canViewLastRoundResults = true;
+        //distribute the chains to each player
+        //  players and chains will have the same length
 
-	this.onResults();
+        for (let i = 0; i < this.players.length; i++) {
+            try {
+                const thisRoundsLinkOrder = this.linkOrder[this.roundNumber];
+                const thisChainIndex = thisRoundsLinkOrder[i];
+                const thisChain = this.chains[thisChainIndex];
+                const thisPlayer = this.players[i];
 
-	const roundTime = (Date.now() - this.startTime) / this.players.length;
+                thisChain.lastPlayerSentTo = thisPlayer.getJson();
 
-	this.players.forEach(player =>
-		player.send("viewResults", {
-			chains,
-			...(player.isHost ? { roundTime } : {})
-		})
-	);
+                //sends the link, then runs the function when the player sends it back
+                //  when the 'finishedLink' event is received
+                ((chain, player) => {
+                    chain.sendLastLinkToThen(
+                        player,
+                        this.finalNumOfLinks,
+                        ({ link }) => {
+                            this.receiveLink(player, link, chain.id);
+                        }
+                    );
+                })(thisChain, thisPlayer);
+            } catch (error) {
+                console.error(error);
+                const {
+                    roundNumber,
+                    linkOrder,
+                    shouldHaveThisManyLinks,
+                    turnLimit,
+                    finalNumOfLinks,
+                } = this;
+                console.log({
+                    roundNumber,
+                    linkOrder,
+                    shouldHaveThisManyLinks,
+                    turnLimit,
+                    numPlayers: this.players.length,
+                    finalNumOfLinks,
+                    i,
+                });
+                this.viewResults();
+            }
+        }
+    }
 
-	try {
-		if (this.shouldArchiveResultsToAws()) {
-			sendResultsToAwsArchive(chains, this.wordPackName);
-		}
-	} catch (error) {
-		console.log("aws upload failed");
-	}
-};
+    getChain(id) {
+        for (let i = 0; i < this.chains.length; i++) {
+            if (this.chains[i].id === id) {
+                return this.chains[i];
+            }
+        }
+        return false;
+    }
 
-Round.prototype.findReplacementFor = function(player, gameCode) {
-	this.disconnectedPlayers.push(player.getJson());
-	this.updateWaitingList();
-	this.sendUpdateToPotentialPlayers(gameCode);
-};
+    getChainByOwnerId(ownerId) {
+        for (let i = 0; i < this.chains.length; i++) {
+            if (this.chains[i].owner.id === ownerId) {
+                return this.chains[i];
+            }
+        }
+        return false;
+    }
 
-Round.prototype.getPlayersThatNeedToBeReplaced = function() {
-	return this.disconnectedPlayers;
-};
+    viewResults() {
+        const chains = this.getAllChains();
 
-Round.prototype.canBeReplaced = function(playerToReplaceId) {
-	for (var i = 0; i < this.disconnectedPlayers.length; i++) {
-		if (this.disconnectedPlayers[i].id === playerToReplaceId) {
-			return true;
-		}
-	}
-	return false;
-};
+        //starts as false, and will be true every round after first round
+        this.canViewLastRoundResults = true;
 
-Round.prototype.replacePlayer = function(
-	playerToReplaceId,
-	newPlayer,
-	gameCode
-) {
-	for (var i = 0; i < this.disconnectedPlayers.length; i++) {
-		if (this.disconnectedPlayers[i].id === playerToReplaceId) {
-			//give 'em the id of the old player
-			newPlayer.id = this.disconnectedPlayers[i].id;
+        this.onResults();
 
-			//replace 'em
-			var playerToReplaceIndex = this.getPlayerIndexById(
-				playerToReplaceId
-			);
-			this.players[playerToReplaceIndex] = newPlayer;
+        const roundTime = (Date.now() - this.startTime) / this.players.length;
 
-			//delete 'em from disconnectedPlayers
-			this.disconnectedPlayers.splice(i, 1);
+        this.players.forEach((player) =>
+            player.send("viewResults", {
+                chains,
+                ...(player.isHost ? { roundTime } : {}),
+            })
+        );
 
-			this.potentialPlayers = this.potentialPlayers.filter(
-				p => p !== newPlayer
-			);
+        try {
+            if (this.shouldArchiveResultsToAws()) {
+                sendResultsToAwsArchive(chains, this.wordPackName);
+            }
+        } catch (error) {
+            console.log("aws upload failed");
+        }
+    }
 
-			this.sendUpdateToPotentialPlayers(gameCode);
+    findReplacementFor(player, gameCode) {
+        this.disconnectedPlayers.push(player.getJson());
+        this.updateWaitingList();
+        this.sendUpdateToPotentialPlayers(gameCode);
+    }
 
-			if (newPlayer.isAi) newPlayer.setAIGuessQueue(this.aiGuessQueue);
+    getPlayersThatNeedToBeReplaced() {
+        return this.disconnectedPlayers;
+    }
 
-			//check if the disconnectedPlayer (dp) had submitted their link
-			var dpChain = this.getChainByLastSentPlayerId(newPlayer.id);
-			var dpDidFinishTheirLink =
-				dpChain.getLength() === this.shouldHaveThisManyLinks;
-			if (dpDidFinishTheirLink) {
-				//send this player to the waiting for players page
-				newPlayer.socket.emit("showWaitingList", {});
-			} else {
-				//send them the link they need to finish
-				var self = this;
-				dpChain.sendLastLinkToThen(
-					newPlayer,
-					this.finalNumOfLinks,
-					function(data) {
-						self.receiveLink(newPlayer, data.link, dpChain.id);
-					}
-				);
-			}
-			return this.players[playerToReplaceIndex];
-		}
-	}
-};
+    canBeReplaced(playerToReplaceId) {
+        for (let i = 0; i < this.disconnectedPlayers.length; i++) {
+            if (this.disconnectedPlayers[i].id === playerToReplaceId) {
+                return true;
+            }
+        }
+        return false;
+    }
 
-Round.prototype.updateWaitingList = function() {
-	this.sendToAll("updateWaitingList", {
-		notFinished: this.getListOfNotFinishedPlayers(),
-		disconnected: this.disconnectedPlayers
-	});
-};
+    replacePlayer(playerToReplaceId, newPlayer, gameCode) {
+        for (let i = 0; i < this.disconnectedPlayers.length; i++) {
+            if (this.disconnectedPlayers[i].id === playerToReplaceId) {
+                //give 'em the id of the old player
+                newPlayer.id = this.disconnectedPlayers[i].id;
 
-Round.prototype.sendUpdateToPotentialPlayers = function(gameCode) {
-	const payload = {
-		gameCode,
-		players: this.getPlayersThatNeedToBeReplaced()
-	};
-	this.potentialPlayers.forEach(player =>
-		player.send("replacePlayer", payload)
-	);
-};
+                //replace 'em
+                const playerToReplaceIndex = this.getPlayerIndexById(
+                    playerToReplaceId
+                );
+                this.players[playerToReplaceIndex] = newPlayer;
 
-Round.prototype.getListOfNotFinishedPlayers = function() {
-	var playerList = [];
+                //delete 'em from disconnectedPlayers
+                this.disconnectedPlayers.splice(i, 1);
 
-	//check to make sure every chain is the same length
-	for (var i = 0; i < this.chains.length; i++) {
-		var thisChain = this.chains[i];
-		var isLastPlayerSentToConnected = this.getPlayer(
-			thisChain.lastPlayerSentTo.id
-		).isConnected;
-		if (
-			thisChain.getLength() !== this.shouldHaveThisManyLinks &&
-			isLastPlayerSentToConnected
-		) {
-			playerList.push(thisChain.lastPlayerSentTo);
-		}
-	}
+                this.potentialPlayers = this.potentialPlayers.filter(
+                    (p) => p !== newPlayer
+                );
 
-	return playerList;
-};
+                this.sendUpdateToPotentialPlayers(gameCode);
 
-Round.prototype.getPlayer = function(id) {
-	for (var i = 0; i < this.players.length; i++) {
-		if (this.players[i].id === id) {
-			return this.players[i];
-		}
-	}
-	return false;
-};
+                if (newPlayer.isAi)
+                    newPlayer.setAIGuessQueue(this.aiGuessQueue);
 
-Round.prototype.getPlayerIndexById = function(id) {
-	for (var i = 0; i < this.players.length; i++) {
-		if (this.players[i].id === id) {
-			return i;
-		}
-	}
-	return false;
-};
+                //check if the disconnectedPlayer (dp) had submitted their link
+                const dpChain = this.getChainByLastSentPlayerId(newPlayer.id);
+                const dpDidFinishTheirLink =
+                    dpChain.getLength() === this.shouldHaveThisManyLinks;
+                if (dpDidFinishTheirLink) {
+                    //send this player to the waiting for players page
+                    newPlayer.socket.emit("showWaitingList", {});
+                } else {
+                    //send them the link they need to finish
+                    dpChain.sendLastLinkToThen(
+                        newPlayer,
+                        this.finalNumOfLinks,
+                        ({ link }) => {
+                            this.receiveLink(newPlayer, link, dpChain.id);
+                        }
+                    );
+                }
+                return this.players[playerToReplaceIndex];
+            }
+        }
+    }
 
-Round.prototype.getChainByLastSentPlayerId = function(id) {
-	for (var i = 0; i < this.chains.length; i++) {
-		if (this.chains[i].lastPlayerSentTo.id === id) {
-			return this.chains[i];
-		}
-	}
-	return false;
-};
+    updateWaitingList() {
+        this.sendToAll("updateWaitingList", {
+            notFinished: this.getListOfNotFinishedPlayers(),
+            disconnected: this.disconnectedPlayers,
+        });
+    }
 
-Round.prototype.sendToAll = function(event, data) {
-	this.players.forEach(function(player) {
-		player.send(event, data);
-	});
-};
+    sendUpdateToPotentialPlayers(gameCode) {
+        const payload = {
+            gameCode,
+            players: this.getPlayersThatNeedToBeReplaced(),
+        };
+        this.potentialPlayers.forEach((player) =>
+            player.send("replacePlayer", payload)
+        );
+    }
 
-Round.prototype.getAllChains = function() {
-	var newChains = [];
-	this.chains.forEach(function(chain) {
-		newChains.push(chain.getJson());
-	});
-	return newChains;
-};
+    getListOfNotFinishedPlayers() {
+        const playerList = [];
 
-Round.prototype.shouldArchiveResultsToAws = function() {
-	const isEnabled =
-		process.env.ACCESS_KEY_ID && process.env.SECRET_ACCESS_KEY;
-	const isNoBots = this.players.reduce((acc, cur) => acc && !cur.isAi);
-	const isAllowedWordPack =
-		this.wordPackName &&
-		(this.wordPackName.includes("Simple") ||
-			this.wordPackName.includes("Advanced"));
-	return isEnabled && isNoBots && isAllowedWordPack;
-};
+        //check to make sure every chain is the same length
+        for (let i = 0; i < this.chains.length; i++) {
+            const thisChain = this.chains[i];
+            const isLastPlayerSentToConnected = this.getPlayer(
+                thisChain.lastPlayerSentTo.id
+            ).isConnected;
+            if (
+                thisChain.getLength() !== this.shouldHaveThisManyLinks &&
+                isLastPlayerSentToConnected
+            ) {
+                playerList.push(thisChain.lastPlayerSentTo);
+            }
+        }
 
-module.exports = Round;
+        return playerList;
+    }
+
+    getPlayer(id) {
+        for (let i = 0; i < this.players.length; i++) {
+            if (this.players[i].id === id) {
+                return this.players[i];
+            }
+        }
+        return false;
+    }
+
+    getPlayerIndexById(id) {
+        for (let i = 0; i < this.players.length; i++) {
+            if (this.players[i].id === id) {
+                return i;
+            }
+        }
+        return false;
+    }
+
+    getChainByLastSentPlayerId(id) {
+        for (let i = 0; i < this.chains.length; i++) {
+            if (this.chains[i].lastPlayerSentTo.id === id) {
+                return this.chains[i];
+            }
+        }
+        return false;
+    }
+
+    sendToAll(event, data) {
+        this.players.forEach((player) => {
+            player.send(event, data);
+        });
+    }
+
+    getAllChains() {
+        const newChains = [];
+        this.chains.forEach((chain) => {
+            newChains.push(chain.getJson());
+        });
+        return newChains;
+    }
+
+    shouldArchiveResultsToAws() {
+        const isEnabled =
+            process.env.ACCESS_KEY_ID && process.env.SECRET_ACCESS_KEY;
+        const isNoBots = this.players.reduce((acc, { isAi }) => acc && !isAi);
+        const isAllowedWordPack =
+            this.wordPackName &&
+            (this.wordPackName.includes("Simple") ||
+                this.wordPackName.includes("Advanced"));
+        return isEnabled && isNoBots && isAllowedWordPack;
+    }
+
+    validTurnLimit(enteredTurnLimit) {
+        return getNewTurnLimit({
+            modifier: 0,
+            prevTurnLimit: enteredTurnLimit,
+            numPlayers: this.players.length,
+            prevNumPlayers: this.players.length,
+            isWordFirst: this.isWordFirstGame,
+        }).newTurnLimit;
+    }
+}
+
+export default Round;
